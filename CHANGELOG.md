@@ -4,6 +4,9 @@ All notable changes to Plunger. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Fixed
+- Help > Documentation and Help > Report an issue did nothing since 0.6.0 (the toolkit upgrade dropped the feature that opens the browser). They open the browser again.
+
 ## [0.6.0] - 2026-10-10
 
 Workflows get a window of their own, the toolkit is current (egui 0.36), and the source is organised by what it does.

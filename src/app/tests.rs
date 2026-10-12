@@ -780,3 +780,12 @@ fn the_sidebar_filter_narrows_history_and_saved() {
     a.refresh_lists();
     assert_eq!(a.history_entries.len(), 2);
 }
+
+/// Help > Documentation and Report an issue call `open_url`; eframe 0.36 drops that silently unless its
+/// `links` feature is on (it was lost in the 0.29 to 0.36 upgrade, and nothing else notices).
+#[test]
+fn eframe_keeps_the_links_feature_so_help_can_open_the_browser() {
+    let manifest = include_str!("../../Cargo.toml");
+    let eframe = manifest.lines().find(|l| l.starts_with("eframe = { version = \"0.36\"")).expect("the eframe line");
+    assert!(eframe.contains("\"links\""), "{eframe}");
+}
