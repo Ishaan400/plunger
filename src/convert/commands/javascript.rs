@@ -41,8 +41,37 @@ fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(path)
 }
 
+/// Request headers that carry a single value (RFC 9110 §5.3): sending one twice is not valid
+/// HTTP, and joining the values does not mean the same thing either.
+const SINGLE_VALUE_HEADERS: &[&str] =
+    &["authorization", "proxy-authorization", "content-type", "content-length", "host", "user-agent", "referer", "range", "if-modified-since", "if-unmodified-since"];
+
+/// One entry per header name, in first-seen order and spelling, as fetch puts them on the wire:
+/// it sends a repeated name once, Cookie values joined with `; ` (RFC 6265 §5.4) and any other
+/// with `, ` (RFC 9110 §5.3), which a server reads the same as separate lines. Doing that here
+/// shows the value that is really sent, on every runtime, instead of leaving it to `Headers`.
+/// Also returns the single-value headers that were repeated, where the joined value differs.
+fn merge_repeated(headers: &[(&str, &str)]) -> (Vec<(String, String)>, Vec<String>) {
+    let mut merged: Vec<(String, String)> = Vec::new();
+    let mut singletons: Vec<String> = Vec::new();
+    for (name, value) in headers {
+        match merged.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+            Some((first, joined)) => {
+                joined.push_str(if name.eq_ignore_ascii_case("cookie") { "; " } else { ", " });
+                joined.push_str(value);
+                let lower = name.to_ascii_lowercase();
+                if SINGLE_VALUE_HEADERS.contains(&lower.as_str()) && !singletons.iter().any(|s| s.eq_ignore_ascii_case(first)) {
+                    singletons.push(first.clone());
+                }
+            }
+            None => merged.push((name.to_string(), value.to_string())),
+        }
+    }
+    (merged, singletons)
+}
+
 pub fn export(p: &Parts) -> String {
-    let mut notes: Vec<&str> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
     let mut before: Vec<String> = Vec::new();
     let mut options: Vec<String> = Vec::new();
 
@@ -50,7 +79,7 @@ pub fn export(p: &Parts) -> String {
         options.push(format!("method: {}", quote(&p.method)));
     }
     if p.has_body() && matches!(p.method.as_str(), "GET" | "HEAD") {
-        notes.push("// fetch refuses a body on a GET or HEAD request.");
+        notes.push("// fetch refuses a body on a GET or HEAD request.".into());
     }
 
     let is_json = p.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.to_ascii_lowercase().contains("json"));
@@ -65,17 +94,16 @@ pub fn export(p: &Parts) -> String {
     if matches!(p.body, PartBody::Form(_)) && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
         headers.push(("Content-Type", "application/x-www-form-urlencoded"));
     }
+    let (headers, repeated_singletons) = merge_repeated(&headers);
+    if !repeated_singletons.is_empty() {
+        notes.push(format!(
+            "// {} is repeated: fetch sends one line with the values joined, where curl sends one line each. A server reads that as one invalid value; keep the one you mean.",
+            repeated_singletons.join(", ")
+        ));
+    }
     if !headers.is_empty() {
-        let lowered: Vec<String> = headers.iter().map(|(k, _)| k.to_ascii_lowercase()).collect();
-        let repeated = lowered.iter().enumerate().any(|(i, k)| lowered[..i].contains(k));
-        // An object literal keeps only the last of a repeated name; with a list of pairs every
-        // value is sent (fetch joins them into one line, `X-A: 1, 2`).
-        let entries: Vec<String> = headers
-            .iter()
-            .map(|(k, v)| if repeated { format!("[{}, {}]", quote(k), quote(v)) } else { format!("{}: {}", quote(k), quote(v)) })
-            .collect();
-        let (open, close) = if repeated { ('[', ']') } else { ('{', '}') };
-        options.push(format!("headers: {open}\n    {}\n  {close}", entries.join(",\n    ")));
+        let entries: Vec<String> = headers.iter().map(|(k, v)| format!("{}: {}", quote(k), quote(v))).collect();
+        options.push(format!("headers: {{\n    {}\n  }}", entries.join(",\n    ")));
     }
 
     match &p.body {
@@ -86,7 +114,7 @@ pub fn export(p: &Parts) -> String {
             if fields.iter().any(|(_, is_file, _)| *is_file) {
                 before.push("import { readFile } from \"node:fs/promises\";".into());
                 before.push(String::new());
-                notes.push("// Reading a file needs Node.js; in a browser, append a File from an <input type=\"file\"> instead.");
+                notes.push("// Reading a file needs Node.js; in a browser, append a File from an <input type=\"file\"> instead.".into());
             }
             before.push("const form = new FormData();".into());
             for (name, is_file, value) in fields {
@@ -104,7 +132,7 @@ pub fn export(p: &Parts) -> String {
         options.push("redirect: \"manual\"".into());
     }
     if p.insecure_tls {
-        notes.push("// Plunger skips certificate checks for this request; fetch has no option for that (Node.js: NODE_TLS_REJECT_UNAUTHORIZED=0 turns them off for the whole process).");
+        notes.push("// Plunger skips certificate checks for this request; fetch has no option for that (Node.js: NODE_TLS_REJECT_UNAUTHORIZED=0 turns them off for the whole process).".into());
     }
 
     let mut out = before.join("\n");
@@ -118,7 +146,7 @@ pub fn export(p: &Parts) -> String {
     }
     for note in notes {
         out.push('\n');
-        out.push_str(note);
+        out.push_str(&note);
     }
     out
 }
@@ -233,10 +261,48 @@ mod tests {
     }
 
     #[test]
-    fn repeated_headers_are_all_sent() {
-        let state = PersistedState { url: "https://h".into(), headers_text: "Accept: text/html\naccept: application/json".into(), ..Default::default() };
+    fn a_repeated_header_is_one_line_with_every_value() {
+        // as fetch sends it, and as a server reads the separate lines curl sends
+        let state = PersistedState {
+            url: "https://h".into(),
+            headers_text: "Accept: text/html\nCookie: session={{sid}}\naccept: application/json\nX-Forwarded-For: 10.0.0.1\ncookie: theme=dark\nX-Forwarded-For: 10.0.0.2".into(),
+            ..Default::default()
+        };
         let text = js(&state);
-        assert!(text.contains("headers: [\n    [\"Accept\", \"text/html\"],\n    [\"accept\", \"application/json\"]\n  ]"), "{text}");
+        assert!(
+            text.contains("headers: {\n    \"Accept\": \"text/html, application/json\",\n    \"Cookie\": \"session={{sid}}; theme=dark\",\n    \"X-Forwarded-For\": \"10.0.0.1, 10.0.0.2\"\n  }"),
+            "{text}"
+        );
+        assert!(!text.contains("is repeated"), "list headers join cleanly: {text}");
+    }
+
+    #[test]
+    fn a_repeated_single_value_header_is_flagged() {
+        let state = PersistedState { url: "https://h".into(), headers_text: "Authorization: Bearer one\nauthorization: Bearer two\nAccept: */*".into(), ..Default::default() };
+        let text = js(&state);
+        assert!(text.contains("\"Authorization\": \"Bearer one, Bearer two\""), "{text}");
+        assert!(text.ends_with("\n// Authorization is repeated: fetch sends one line with the values joined, where curl sends one line each. A server reads that as one invalid value; keep the one you mean."), "{text}");
+    }
+
+    #[test]
+    fn no_line_ends_in_whitespace() {
+        let mut states = vec![
+            json_post("{\n  \"a\": [1, {\"b\": \"c  \"}],\n  \"d\": {}\n}  "),
+            PersistedState { method: "PUT".into(), url: "https://h ".into(), body_mode: BodyMode::Raw, raw_body: "x  \n  y \n".into(), ..Default::default() },
+            PersistedState { follow_redirects: false, insecure_tls: true, headers_text: "A: 1\na: 2\nHost: h\nhost: i".into(), ..json_post("{}") },
+        ];
+        states.push(PersistedState {
+            method: "POST".into(),
+            body_mode: BodyMode::Multipart,
+            multipart_fields: vec![FormField { key: "f".into(), kind: FieldKind::File, value: "a.txt ".into(), enabled: true }],
+            ..Default::default()
+        });
+        for state in states {
+            let text = js(&state);
+            for line in text.lines() {
+                assert_eq!(line, line.trim_end(), "{text}");
+            }
+        }
     }
 
     #[test]
