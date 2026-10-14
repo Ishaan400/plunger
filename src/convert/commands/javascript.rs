@@ -44,7 +44,23 @@ fn file_name(path: &str) -> &str {
 /// Request headers that carry a single value (RFC 9110 §5.3): sending one twice is not valid
 /// HTTP, and joining the values does not mean the same thing either.
 const SINGLE_VALUE_HEADERS: &[&str] =
-    &["authorization", "proxy-authorization", "content-type", "content-length", "host", "user-agent", "referer", "range", "if-modified-since", "if-unmodified-since"];
+    &["authorization", "proxy-authorization", "content-type", "user-agent", "referer", "range", "if-modified-since", "if-unmodified-since"];
+
+/// Headers fetch sets itself: Node.js drops a Host it is given, and fails the request when a
+/// Content-Length does not match the body.
+const SET_BY_FETCH: &[&str] = &["host", "content-length"];
+
+/// Headers Node.js's fetch refuses: the request fails before anything is sent.
+const REFUSED_BY_FETCH: &[&str] = &["keep-alive", "transfer-encoding", "upgrade", "expect"];
+
+/// `Host` / `Host and Expect` / `Host, Expect and Upgrade`
+fn names(list: &[&str]) -> String {
+    match list {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
 
 /// One entry per header name, in first-seen order and spelling, as fetch puts them on the wire:
 /// it sends a repeated name once, Cookie values joined with `; ` (RFC 6265 §5.4) and any other
@@ -94,11 +110,36 @@ pub fn export(p: &Parts) -> String {
     if matches!(p.body, PartBody::Form(_)) && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
         headers.push(("Content-Type", "application/x-www-form-urlencoded"));
     }
+    // Left out rather than written into a snippet that would lose them or fail.
+    let is_one_of = |list: &[&str], name: &str| list.iter().any(|h| h.eq_ignore_ascii_case(name));
+    let mut set_by_fetch: Vec<&str> = Vec::new();
+    let mut refused: Vec<&str> = Vec::new();
+    headers.retain(|(k, _)| {
+        let out = if is_one_of(SET_BY_FETCH, k) {
+            &mut set_by_fetch
+        } else if is_one_of(REFUSED_BY_FETCH, k) {
+            &mut refused
+        } else {
+            return true;
+        };
+        if !out.iter().any(|seen| seen.eq_ignore_ascii_case(k)) {
+            out.push(*k);
+        }
+        false
+    });
+    let it = |list: &[&str]| if list.len() == 1 { "it" } else { "them" };
+    if !set_by_fetch.is_empty() {
+        notes.push(format!("// Left out: {}. fetch sets {} itself, so the value here would not be sent.", names(&set_by_fetch), it(&set_by_fetch)));
+    }
+    if !refused.is_empty() {
+        notes.push(format!("// Left out: {}. Node.js's fetch refuses a request with {}.", names(&refused), it(&refused)));
+    }
+
     let (headers, repeated_singletons) = merge_repeated(&headers);
     if !repeated_singletons.is_empty() {
         notes.push(format!(
-            "// {} is repeated: fetch sends one line with the values joined, where curl sends one line each. A server reads that as one invalid value; keep the one you mean.",
-            repeated_singletons.join(", ")
+            "// {} appears more than once. fetch sends one line with the values joined, where Plunger sends one line each; it takes a single value, so keep the one you mean.",
+            names(&repeated_singletons.iter().map(String::as_str).collect::<Vec<_>>())
         ));
     }
     if !headers.is_empty() {
@@ -281,7 +322,29 @@ mod tests {
         let state = PersistedState { url: "https://h".into(), headers_text: "Authorization: Bearer one\nauthorization: Bearer two\nAccept: */*".into(), ..Default::default() };
         let text = js(&state);
         assert!(text.contains("\"Authorization\": \"Bearer one, Bearer two\""), "{text}");
-        assert!(text.ends_with("\n// Authorization is repeated: fetch sends one line with the values joined, where curl sends one line each. A server reads that as one invalid value; keep the one you mean."), "{text}");
+        assert!(
+            text.ends_with("\n// Authorization appears more than once. fetch sends one line with the values joined, where Plunger sends one line each; it takes a single value, so keep the one you mean."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn headers_fetch_sets_itself_or_refuses_are_left_out_and_named() {
+        // Node.js drops a Host it is given, fails on a Content-Length that does not match the
+        // body, and refuses Keep-Alive, Transfer-Encoding, Upgrade and Expect outright
+        let state = PersistedState {
+            headers_text: "Host: api.example.com\nContent-Length: 999\nExpect: 100-continue\nX-Keep: yes\nhost: other\nTransfer-Encoding: chunked".into(),
+            ..json_post("{}")
+        };
+        let text = js(&state);
+        for gone in ["api.example.com", "999", "100-continue", "chunked", "other"] {
+            assert!(!text.contains(gone), "{gone}: {text}");
+        }
+        assert!(text.contains("\"X-Keep\": \"yes\""), "{text}");
+        assert!(text.contains("\n// Left out: Host and Content-Length. fetch sets them itself, so the value here would not be sent."), "{text}");
+        assert!(text.contains("\n// Left out: Expect and Transfer-Encoding. Node.js's fetch refuses a request with them."), "{text}");
+        let one = PersistedState { url: "https://h".into(), headers_text: "Host: api.example.com".into(), ..Default::default() };
+        assert_eq!(js(&one), "await fetch(\"https://h\");\n// Left out: Host. fetch sets it itself, so the value here would not be sent.");
     }
 
     #[test]
