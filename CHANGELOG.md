@@ -4,6 +4,9 @@ All notable changes to Plunger. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Added
+- File > Copy as and File > Export request can write a request as a JavaScript `fetch` call that runs in Node.js 18+. A JSON body becomes `JSON.stringify({...})`, and `{{variables}}` stay as placeholders.
+
 ### Fixed
 - Help > Documentation and Help > Report an issue did nothing since 0.6.0 (the toolkit upgrade dropped the feature that opens the browser). They open the browser again.
 

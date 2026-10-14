@@ -1,8 +1,10 @@
 //! A request written out as, and read back from, a command someone can paste into a shell:
-//! curl for bash, curl for the Windows command prompt, and PowerShell. `{{variables}}` stay as
-//! placeholders when exporting, so an exported command never carries a secret.
+//! curl for bash, curl for the Windows command prompt, and PowerShell; and written out as a
+//! JavaScript `fetch` call. `{{variables}}` stay as placeholders when exporting, so an exported
+//! command never carries a secret.
 
 mod cmd;
+mod javascript;
 mod powershell;
 
 use crate::domain::model::{BodyMode, FieldKind, ParsedRequest, PersistedState};
@@ -15,10 +17,12 @@ pub enum Dialect {
     CurlCmd,
     PowerShellRest,
     PowerShellWeb,
+    /// Export only.
+    JavaScriptFetch,
 }
 
 impl Dialect {
-    pub const ALL: [Dialect; 4] = [Dialect::CurlBash, Dialect::CurlCmd, Dialect::PowerShellRest, Dialect::PowerShellWeb];
+    pub const ALL: [Dialect; 5] = [Dialect::CurlBash, Dialect::CurlCmd, Dialect::PowerShellRest, Dialect::PowerShellWeb, Dialect::JavaScriptFetch];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -26,6 +30,7 @@ impl Dialect {
             Dialect::CurlCmd => "curl (Windows cmd)",
             Dialect::PowerShellRest => "PowerShell (Invoke-RestMethod)",
             Dialect::PowerShellWeb => "PowerShell (Invoke-WebRequest)",
+            Dialect::JavaScriptFetch => "JavaScript (fetch)",
         }
     }
 }
@@ -99,6 +104,7 @@ pub fn export(state: &PersistedState, dialect: Dialect) -> String {
         Dialect::CurlCmd => cmd::export(&Parts::from_state(state)),
         Dialect::PowerShellRest => powershell::export(&Parts::from_state(state), "Invoke-RestMethod"),
         Dialect::PowerShellWeb => powershell::export(&Parts::from_state(state), "Invoke-WebRequest"),
+        Dialect::JavaScriptFetch => javascript::export(&Parts::from_state(state)),
     }
 }
 
@@ -122,6 +128,8 @@ pub fn import(input: &str) -> Result<ParsedRequest, String> {
         Dialect::CurlBash => crate::convert::curl_import::parse_curl(input),
         Dialect::CurlCmd => crate::convert::curl_import::parse_curl(&cmd::normalize(input)),
         Dialect::PowerShellRest | Dialect::PowerShellWeb => powershell::parse(input),
+        // `detect` never picks it: JavaScript is export only.
+        Dialect::JavaScriptFetch => Err("Plunger cannot import a JavaScript fetch call.".into()),
     }
 }
 
@@ -173,7 +181,8 @@ mod tests {
 
     #[test]
     fn every_dialect_round_trips_through_its_own_importer() {
-        for dialect in Dialect::ALL {
+        // JavaScript is export only
+        for dialect in Dialect::ALL.into_iter().filter(|d| *d != Dialect::JavaScriptFetch) {
             for s in sample_states() {
                 let text = export(&s, dialect);
                 let back = import(&text).unwrap_or_else(|e| panic!("{dialect:?}: {e}\n{text}"));

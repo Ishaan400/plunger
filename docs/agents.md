@@ -212,7 +212,7 @@ These are refused with a message rather than silently ignored: `-x/--proxy`, `--
 
 Exit codes follow curl: 0 ok, 22 with `-f` and a status of 400 or higher, 6 DNS, 7 connection refused, 28 timeout, 60 TLS, and 2 when Plunger refused to send (for example an undefined variable), which is always reported on stderr even with `-s`.
 
-To hand a request from the window to an agent or a script, **File > Copy as** writes it as curl (bash), curl (Windows cmd) or PowerShell, and `plunger export` prints the curl form.
+To hand a request from the window to an agent or a script, **File > Copy as** writes it as curl (bash), curl (Windows cmd), PowerShell or JavaScript (`fetch`), and `plunger export` prints the curl form.
 
 A URL can also be given straight to `send`: `plunger send https://api.example.com/items`.
 
